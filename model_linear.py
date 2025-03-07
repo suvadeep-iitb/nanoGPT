@@ -66,7 +66,8 @@ class Block(nn.Module):
         self.mlp = MLP(config)
 
     def forward(self, x):
-        x = x + self.local_attn(self.ln_lc(x)) + self.linear_attn(self.ln_li(x))
+        x = x + self.local_attn(self.ln_lc(x)) 
+        x = x + self.linear_attn(self.ln_li(x))
         x = x + self.mlp(self.ln_mlp(x))
         return x
 

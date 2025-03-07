@@ -42,7 +42,7 @@ init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
 # wandb logging
 wandb_log = True # disabled by default
 wandb_project = 'owt'
-wandb_run_name = 'gpt2_linearComposite_wiki40B' # 'run' + str(time.time())
+wandb_run_name = 'gpt2_linearCompositeSerial_wiki40B' # 'run' + str(time.time())
 # data
 dataset = 'wiki40b_sentPieceTokenizer_vocabSize32K'
 gradient_accumulation_steps = 2 * 8 # used to simulate larger batch sizes
