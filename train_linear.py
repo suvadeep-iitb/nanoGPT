@@ -226,7 +226,7 @@ def estimate_loss():
             with ctx:
                 logits, loss = model(X, Y)
             losses[k] = loss.item()
-        out[split] = losses.mean()
+        out[split] = losses.to(dtype=torch.float32).mean()
     model.train()
     return out
 
