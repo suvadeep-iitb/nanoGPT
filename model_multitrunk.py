@@ -106,18 +106,16 @@ class MultiTrunkSelfAttention(nn.Module):
             input_type = 'qkv',
             bias = config.bias
         )
-        self.ln_lo = LayerNorm(config.n_embd_value, bias=config.bias)
-        self.ln_li = LayerNorm(config.n_embd_value, bias=config.bias)
 
     def forward(self, inp):
         assert len(inp) == 5
         v, q_local, k_local, q_linear, k_linear = inp
         q_local = self.local_qnet(q_local)
         k_local = self.local_knet(k_local)
-        v_local = self.local_attn([q_local, k_local, self.ln_lo(v)])
+        v_local = self.local_attn([q_local, k_local, v])
         q_linear = self.linear_qnet(q_linear)
         k_linear = self.linear_knet(k_linear)
-        v_linear = self.linear_attn([q_linear, k_linear, self.ln_li(v)])
+        v_linear = self.linear_attn([q_linear, k_linear, v])
         v = v_local + v_linear
         return [v, q_local, k_local, q_linear, k_linear]
 
