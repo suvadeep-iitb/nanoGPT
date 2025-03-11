@@ -21,15 +21,13 @@ class LocalAttentionParallel(nn.Module):
     between (-attn_span, -1) for cuasal attention and between (-attn_span, attn_span)
     for non-causal attention)
     """
-    def __init__(self, n_embd, n_query_embd, block_size, attn_span, use_query_emb=False, use_key_emb=False, ln_bias=True):
+    def __init__(self, n_embd, n_query_embd, block_size, attn_span, ln_bias=True):
         """
         Args:
             n_embd: embedding dimension
             n_query_embd: dimension of the query embedding
             block_size: length of the sequence block
             attn_span: maximum attention span for each query
-            use_query_emb: Whether query embedding is being used
-            use_key_emb: Whether key embedding is being used
             ln_bias: Whether to use bias in ln layer
         """
         super(LocalAttentionParallel, self).__init__()
@@ -38,8 +36,6 @@ class LocalAttentionParallel(nn.Module):
         self.n_query_embd = n_query_embd
         self.block_size = block_size
         self.attn_span = attn_span
-        self.use_query_emb = use_query_emb
-        self.use_key_emb = use_key_emb
         self.ln_bias = ln_bias
         # Create the causal mask
         mask = self.get_mask()
@@ -47,24 +43,20 @@ class LocalAttentionParallel(nn.Module):
         # Create the network for query, key, value
         #self.qkv_net = nn.Linear(self.n_embd, 3 * self.n_embd)
         self.q_net = nn.Sequential(
-            nn.Linear(self.n_embd, self.n_embd),
+            nn.Linear(self.n_embd, self.n_embd, bias=False),
             nn.GELU(),
-            nn.Linear(self.n_embd, self.n_embd),
+            nn.Linear(self.n_embd, self.n_embd, bias=False),
         )
         self.k_net = nn.Sequential(
-            nn.Linear(self.n_embd, self.n_embd),
+            nn.Linear(self.n_embd, self.n_embd, bias=False),
             nn.GELU(),
-            nn.Linear(self.n_embd, self.n_embd),
+            nn.Linear(self.n_embd, self.n_embd, bias=False),
         )
         self.v_net = nn.Sequential(
-            nn.Linear(self.n_embd, self.n_embd),
+            nn.Linear(self.n_embd, self.n_embd, bias=False),
             nn.GELU(),
-            nn.Linear(self.n_embd, self.n_embd),
+            nn.Linear(self.n_embd, self.n_embd, bias=False),
         )
-        if self.use_query_emb:
-            self.q_emb_net = nn.Linear(self.n_query_embd, self.n_embd)
-        if self.use_key_emb:
-            self.k_emb_net = nn.Linear(self.n_query_embd, self.n_embd)
         self.ln = LayerNorm(self.n_embd, bias=self.ln_bias)
 
 
@@ -74,19 +66,11 @@ class LocalAttentionParallel(nn.Module):
         return mask
 
 
-    def forward(self, x, query_emb=None, key_emb=None):
+    def forward(self, x):
         B, T, C = x.size()
-        if query_emb is not None:
-            q = x + self.q_emb_net(query_emb)
-        else:
-            q = x
-        if key_emb is not None:
-            k = x + self.k_emb_net(key_emb)
-        else:
-            k = x
         #q, k, v = self.qkv_net(x).split(self.n_embd, dim=-1)
-        q = self.q_net(q)
-        k = self.k_net(k)
+        q = self.q_net(x)
+        k = self.k_net(x)
         v = self.v_net(x)
 
         scaling_factor = np.sqrt(self.n_embd * self.attn_span)
@@ -100,14 +84,12 @@ class LinearAttentionParallel(nn.Module):
     """
     Parallel implementation of LinearAttention
     """
-    def __init__(self, n_embd, n_query_embd, block_size, use_query_emb=False, use_key_emb=False, ln_bias=True):
+    def __init__(self, n_embd, n_query_embd, block_size, ln_bias=True):
         """
         Args:
             n_embd: embedding dimension
             n_query_embd: dimension of the query embedding
             block_size: length of the sequence block
-            use_query_emb: Whether query embedding is being used
-            use_key_emb: Whether key embedding is being used
             ln_bias: Whether to use bias in ln layer
         """
         super(LinearAttentionParallel, self).__init__()
@@ -115,8 +97,6 @@ class LinearAttentionParallel(nn.Module):
         self.n_embd = n_embd
         self.n_query_embd = n_query_embd
         self.block_size = block_size
-        self.use_query_emb = use_query_emb
-        self.use_key_emb = use_key_emb
         self.ln_bias = ln_bias
         # Create the causal mask
         mask = self.get_mask()
@@ -124,24 +104,20 @@ class LinearAttentionParallel(nn.Module):
         # Create the network for query, key, value
         #self.qkv_net = nn.Linear(self.n_embd, 3 * self.n_embd)
         self.q_net = nn.Sequential(
-            nn.Linear(self.n_embd, self.n_embd),
+            nn.Linear(self.n_embd, self.n_embd, bias=False),
             nn.GELU(),
-            nn.Linear(self.n_embd, self.n_embd),
+            nn.Linear(self.n_embd, self.n_embd, bias=False),
         )
         self.k_net = nn.Sequential(
-            nn.Linear(self.n_embd, self.n_embd),
+            nn.Linear(self.n_embd, self.n_embd, bias=False),
             nn.GELU(),
-            nn.Linear(self.n_embd, self.n_embd),
+            nn.Linear(self.n_embd, self.n_embd, bias=False),
         )
         self.v_net = nn.Sequential(
-            nn.Linear(self.n_embd, self.n_embd),
+            nn.Linear(self.n_embd, self.n_embd, bias=False),
             nn.GELU(),
-            nn.Linear(self.n_embd, self.n_embd),
+            nn.Linear(self.n_embd, self.n_embd, bias=False),
         )
-        if self.use_query_emb:
-            self.q_emb_net = nn.Linear(self.n_query_embd, self.n_embd)
-        if self.use_key_emb:
-            self.k_emb_net = nn.Linear(self.n_query_embd, self.n_embd)
         self.ln = LayerNorm(self.n_embd, bias=self.ln_bias)
 
 
@@ -150,19 +126,11 @@ class LinearAttentionParallel(nn.Module):
         return mask
 
 
-    def forward(self, x, query_emb=None, key_emb=None):
+    def forward(self, x):
         B, T, C = x.size()
-        if query_emb is not None:
-            q = x + self.q_emb_net(query_emb)
-        else:
-            q = x
-        if key_emb is not None:
-            k = x + self.k_emb_net(key_emb)
-        else:
-            k = x
         #q, k, v = self.qkv_net(x).split(self.n_embd, dim=-1)
-        q = self.q_net(q)
-        k = self.k_net(k)
+        q = self.q_net(x)
+        k = self.k_net(x)
         v = self.v_net(x)
 
         scaling_factor = np.sqrt(self.n_embd * self.block_size)
