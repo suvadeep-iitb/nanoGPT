@@ -52,6 +52,7 @@ block_size = 2048
 n_layer = 6
 n_head = 6
 n_embd = 192
+n_local_head = n_head // 2
 local_attn_span = 20
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
@@ -145,8 +146,9 @@ if os.path.exists(meta_path):
     print(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
 
 # model init
-model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, local_attn_span=local_attn_span,
-                  block_size=block_size, bias=bias, vocab_size=None, dropout=dropout) # start with model_args from command line
+model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, n_local_head=n_local_head,
+                  local_attn_span=local_attn_span, block_size=block_size, bias=bias, 
+                  vocab_size=None, dropout=dropout) # start with model_args from command line
 if init_from == 'scratch':
     # init a new model from scratch
     print("Initializing a new model from scratch")

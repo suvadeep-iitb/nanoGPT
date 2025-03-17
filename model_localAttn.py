@@ -46,7 +46,7 @@ class CausalSelfAttention(nn.Module):
         local_att_mask = torch.tril(torch.ones([config.block_size, config.block_size]), 0) \
                 * (1.0 - torch.tril(torch.ones([config.block_size, config.block_size]), -config.local_attn_span))
         causal_mask = torch.tril(torch.ones(config.block_size, config.block_size))
-        bias = torch.stack([local_att_mask]*(self.n_head//2) + [causal_mask]*(self.n_head-self.n_head//2), dim=0)
+        bias = torch.stack([local_att_mask]*config.n_local_head + [causal_mask]*(self.n_head-config.n_local_head), dim=0)
         mask = bias.bool()
         self.register_buffer("mask", mask.view(1, self.n_head, config.block_size, config.block_size))
 
@@ -113,6 +113,7 @@ class GPTConfig:
     n_layer: int = 12
     n_head: int = 12
     n_embd: int = 768
+    n_local_head: int = 3
     local_attn_span: int = 30
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
