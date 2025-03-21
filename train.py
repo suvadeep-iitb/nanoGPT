@@ -36,7 +36,7 @@ out_dir = 'out'
 eval_interval = 50
 log_interval = 1
 eval_iters = 50
-global_seed = 0 # Used for reproducibilty of results
+global_seed = 1 # Used for reproducibilty of results
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
@@ -146,8 +146,8 @@ if os.path.exists(meta_path):
     print(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
 
 # model init
-model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
-                  bias=bias, vocab_size=None, dropout=dropout) # start with model_args from command line
+model_args = dict(n_layer=n_layer, n_head=n_head, head_dim=head_dim, n_embd=n_embd, 
+                  block_size=block_size, bias=bias, vocab_size=None, dropout=dropout) # start with model_args from command line
 if init_from == 'scratch':
     # init a new model from scratch
     print("Initializing a new model from scratch")
