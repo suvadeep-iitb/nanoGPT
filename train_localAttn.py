@@ -36,13 +36,15 @@ out_dir = 'out'
 eval_interval = 50
 log_interval = 1
 eval_iters = 50
+global_seed = 0 # Used for reproducibilty of results
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
-init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
+init_from = 'scratch' # 'scratch' or 'resume'
+ckpt_path = 'ckpt.pt'
 # wandb logging
 wandb_log = True # disabled by default
 wandb_project = 'owt_pg19'
-wandb_run_name = 'gpt2_noSoftmaxShared' # 'run' + str(time.time())
+wandb_run_name = 'gpt2_softmaxLocalAttn' # 'run' + str(time.time())
 # data
 dataset = 'pg19_sentPieceTokenizer_vocabSize10K'
 gradient_accumulation_steps = 2 # used to simulate larger batch sizes
@@ -51,6 +53,7 @@ block_size = 2048
 # model
 n_layer = 6
 n_head = 6
+head_dim = 32
 n_embd = 192
 n_local_head = n_head // 2
 local_attn_span = 20
@@ -105,7 +108,7 @@ print(f"tokens per iteration will be: {tokens_per_iter:,}")
 
 if master_process:
     os.makedirs(out_dir, exist_ok=True)
-torch.manual_seed(1337 + seed_offset)
+torch.manual_seed(1337 + seed_offset + global_seed)
 torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
 torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
 device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.autocast
@@ -146,9 +149,9 @@ if os.path.exists(meta_path):
     print(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
 
 # model init
-model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, n_local_head=n_local_head,
-                  local_attn_span=local_attn_span, block_size=block_size, bias=bias, 
-                  vocab_size=None, dropout=dropout) # start with model_args from command line
+model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, head_dim=head_dim,
+                  n_local_head=n_local_head, local_attn_span=local_attn_span, 
+                  block_size=block_size, bias=bias, vocab_size=None, dropout=dropout) # start with model_args from command line
 if init_from == 'scratch':
     # init a new model from scratch
     print("Initializing a new model from scratch")
@@ -161,7 +164,7 @@ if init_from == 'scratch':
 elif init_from == 'resume':
     print(f"Resuming training from {out_dir}")
     # resume training from a checkpoint.
-    ckpt_path = os.path.join(out_dir, 'ckpt.pt')
+    ckpt_path = os.path.join(out_dir, ckpt_path)
     checkpoint = torch.load(ckpt_path, map_location=device)
     checkpoint_model_args = checkpoint['model_args']
     # force these config attributes to be equal otherwise we can't even resume training
@@ -181,14 +184,6 @@ elif init_from == 'resume':
     model.load_state_dict(state_dict)
     iter_num = checkpoint['iter_num']
     best_val_loss = checkpoint['best_val_loss']
-elif init_from.startswith('gpt2'):
-    print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
-    # initialize from OpenAI GPT-2 weights
-    override_args = dict(dropout=dropout)
-    model = GPT.from_pretrained(init_from, override_args)
-    # read off the created config params, so we can store them into checkpoint correctly
-    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
-        model_args[k] = getattr(model.config, k)
 # crop down the model block size if desired, using model surgery
 if block_size < model.config.block_size:
     model.crop_block_size(block_size)
@@ -291,7 +286,7 @@ while True:
                     'config': config,
                 }
                 print(f"saving checkpoint to {out_dir}")
-                torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
+                torch.save(checkpoint, os.path.join(out_dir, ckpt_path))
     if iter_num == 0 and eval_only:
         break
 

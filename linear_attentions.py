@@ -41,7 +41,8 @@ class LocalAttentionParallel(nn.Module):
         mask = self.get_mask()
         self.register_buffer('mask', mask, persistent=False)
         # Create the network for query, key, value
-        #self.qkv_net = nn.Linear(self.n_embd, 3 * self.n_embd)
+        self.qkv_net = nn.Linear(self.n_embd, 3 * self.n_embd)
+        '''
         self.q_net = nn.Sequential(
             nn.Linear(self.n_embd, self.n_embd, bias=False),
             nn.GELU(),
@@ -57,6 +58,7 @@ class LocalAttentionParallel(nn.Module):
             nn.GELU(),
             nn.Linear(self.n_embd, self.n_embd, bias=False),
         )
+        '''
         self.ln = LayerNorm(self.n_embd, bias=self.ln_bias)
 
 
@@ -68,10 +70,12 @@ class LocalAttentionParallel(nn.Module):
 
     def forward(self, x):
         B, T, C = x.size()
-        #q, k, v = self.qkv_net(x).split(self.n_embd, dim=-1)
+        q, k, v = self.qkv_net(x).split(self.n_embd, dim=-1)
+        '''
         q = self.q_net(x)
         k = self.k_net(x)
         v = self.v_net(x)
+        '''
 
         scaling_factor = np.sqrt(self.n_embd * self.attn_span)
         attn_scores = torch.einsum('bid,bjd->bij', (q, k)) / scaling_factor
@@ -102,7 +106,8 @@ class LinearAttentionParallel(nn.Module):
         mask = self.get_mask()
         self.register_buffer('mask', mask, persistent=False)
         # Create the network for query, key, value
-        #self.qkv_net = nn.Linear(self.n_embd, 3 * self.n_embd)
+        self.qkv_net = nn.Linear(self.n_embd, 3 * self.n_embd)
+        '''
         self.q_net = nn.Sequential(
             nn.Linear(self.n_embd, self.n_embd, bias=False),
             nn.GELU(),
@@ -118,6 +123,7 @@ class LinearAttentionParallel(nn.Module):
             nn.GELU(),
             nn.Linear(self.n_embd, self.n_embd, bias=False),
         )
+        '''
         self.ln = LayerNorm(self.n_embd, bias=self.ln_bias)
 
 
@@ -128,10 +134,12 @@ class LinearAttentionParallel(nn.Module):
 
     def forward(self, x):
         B, T, C = x.size()
-        #q, k, v = self.qkv_net(x).split(self.n_embd, dim=-1)
+        q, k, v = self.qkv_net(x).split(self.n_embd, dim=-1)
+        '''
         q = self.q_net(x)
         k = self.k_net(x)
         v = self.v_net(x)
+        '''
 
         scaling_factor = np.sqrt(self.n_embd * self.block_size)
         attn_scores = torch.einsum('bid,bjd->bij', (q, k)) / scaling_factor

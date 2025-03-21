@@ -35,25 +35,27 @@ from model_linear import GPTConfig, GPT
 out_dir = 'out'
 eval_interval = 50
 log_interval = 1
-eval_iters = 200
+eval_iters = 50
+global_seed = 0 # Used for reproducibilty of results
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
+ckpt_path = 'ckpt.pt'
 # wandb logging
 wandb_log = True # disabled by default
-wandb_project = 'owt'
-wandb_run_name = 'gpt2_linearCompositeSerial_wiki40B' # 'run' + str(time.time())
+wandb_project = 'owt_pg19'
+wandb_run_name = 'gpt2_linearComposite' # 'run' + str(time.time())
 # data
-dataset = 'wiki40b_sentPieceTokenizer_vocabSize32K'
-gradient_accumulation_steps = 2 * 8 # used to simulate larger batch sizes
-batch_size = 32 # if gradient_accumulation_steps > 1, this is the micro-batch size
-block_size = 1024
+dataset = 'pg19_sentPieceTokenizer_vocabSize10K'
+gradient_accumulation_steps = 2 # used to simulate larger batch sizes
+batch_size = 128 # if gradient_accumulation_steps > 1, this is the micro-batch size
+block_size = 2048
 # model
 n_layer = 6
 n_head = 1
-n_embd = 768
-n_query_embd = 768
-local_attn_span = 50
+n_embd = 192
+n_query_embd = 192
+local_attn_span = 20
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer
@@ -105,7 +107,7 @@ print(f"tokens per iteration will be: {tokens_per_iter:,}")
 
 if master_process:
     os.makedirs(out_dir, exist_ok=True)
-torch.manual_seed(1337 + seed_offset)
+torch.manual_seed(1337 + seed_offset + global_seed)
 torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
 torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
 device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.autocast
@@ -161,7 +163,7 @@ if init_from == 'scratch':
 elif init_from == 'resume':
     print(f"Resuming training from {out_dir}")
     # resume training from a checkpoint.
-    ckpt_path = os.path.join(out_dir, 'ckpt.pt')
+    ckpt_path = os.path.join(out_dir, ckpt_path)
     checkpoint = torch.load(ckpt_path, map_location=device)
     checkpoint_model_args = checkpoint['model_args']
     # force these config attributes to be equal otherwise we can't even resume training
@@ -247,7 +249,10 @@ def get_lr(it):
 # logging
 if wandb_log and master_process:
     import wandb
-    wandb.init(project=wandb_project, name=wandb_run_name, config=config)
+    if init_from == 'resume':
+        wandb.init(project=wandb_project, name=wandb_run_name, config=config, resume="allow")
+    else:
+        wandb.init(project=wandb_project, name=wandb_run_name, config=config)
 
 # training loop
 X, Y = get_batch('train') # fetch the very first batch
@@ -288,7 +293,7 @@ while True:
                     'config': config,
                 }
                 print(f"saving checkpoint to {out_dir}")
-                torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
+                torch.save(checkpoint, os.path.join(out_dir, ckpt_path))
     if iter_num == 0 and eval_only:
         break
 
