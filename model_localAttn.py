@@ -81,9 +81,12 @@ class MLP(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
+        n_inner_d = 4 * config.n_embd
+        # Adjust inner dimension to accomodate parameter reduction in Self Attention
+        n_inner_d += (config.n_embd - config.head_dim * config.n_head) * 2
+        self.c_fc    = nn.Linear(config.n_embd,  n_inner_d, bias=config.bias)
         self.gelu    = nn.GELU()
-        self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
+        self.c_proj  = nn.Linear(n_inner_d, config.n_embd, bias=config.bias)
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
