@@ -42,7 +42,7 @@ class CausalSelfAttention(nn.Module):
         self.n_embd = config.n_embd
         self.dropout = config.dropout
         # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
-        self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+        self.flash = False #hasattr(torch.nn.functional, 'scaled_dot_product_attention')
         # causal mask to ensure that attention is only applied to the left in the input sequence
         local_att_mask = torch.tril(torch.ones([config.block_size, config.block_size]), 0) \
                 * (1.0 - torch.tril(torch.ones([config.block_size, config.block_size]), -config.local_attn_span))
