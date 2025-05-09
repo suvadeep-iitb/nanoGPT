@@ -33,14 +33,14 @@ from model_localAttn import GPTConfig, GPT
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
 out_dir = 'out'
-eval_interval = 50
+eval_interval = 500
 log_interval = 1
-eval_iters = 50
+eval_iters = 500
 global_seed = 0 # Used for reproducibilty of results
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 init_from = 'scratch' # 'scratch' or 'resume'
-ckpt_path = 'ckpt.pt'
+ckpt_path = 'ckpt_softmaxLocalAttn'
 # wandb logging
 wandb_log = True # disabled by default
 wandb_project = 'pg19_pytorch_attn'
@@ -55,13 +55,13 @@ n_layer = 6
 n_head = 6
 head_dim = 32
 n_embd = 192
-n_local_head = n_head // 2
-local_attn_span = 20
+n_local_head = n_head - 1
+local_attn_span = 50
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer
 learning_rate = 6e-4 # max learning rate
-max_iters = 600000 # total number of training iterations
+max_iters = 50000 # total number of training iterations
 weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
@@ -75,8 +75,8 @@ min_lr = 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchi
 backend = 'nccl' # 'nccl', 'gloo', etc.
 # system
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
-#dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
-dtype = 'float32'
+dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
+#dtype = 'float32'
 compile = True # use PyTorch 2.0 to compile the model to be faster
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
@@ -275,8 +275,10 @@ while True:
                 "time_per_step": dt * ddp_world_size * 1000, # convert to ms
                 "mfu": running_mfu*100, # convert to percentage
             })
-        if losses['val'] < best_val_loss or always_save_checkpoint:
+        #if losses['val'] < best_val_loss or always_save_checkpoint:
+        if losses['val'] < best_val_loss:
             best_val_loss = losses['val']
+        if iter_num % 2000 == 0:
             if iter_num > 0:
                 checkpoint = {
                     'model': raw_model.state_dict(),
@@ -287,7 +289,7 @@ while True:
                     'config': config,
                 }
                 print(f"saving checkpoint to {out_dir}")
-                torch.save(checkpoint, os.path.join(out_dir, ckpt_path))
+                torch.save(checkpoint, os.path.join(out_dir, ckpt_path+'_%s.pt'%iter_num))
     if iter_num == 0 and eval_only:
         break
 
