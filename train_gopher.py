@@ -27,7 +27,7 @@ import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
-from model_adagc import GPTConfig, GPT
+from model import GPTConfig, GPT
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
@@ -40,21 +40,21 @@ global_seed = 0 # Used for reproducibilty of results
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 init_from = 'scratch' # 'scratch' or 'resume'
-ckpt_path = 'ckpt_softmaxAdaGC_H12_HDim64_blkSize2048'
+ckpt_path = 'ckpt_softmax_H36_HDim64'
 # wandb logging
 wandb_log = True # disabled by default
-wandb_project = 'pg19_flash_attn'
+wandb_project = 'pg19_gopher'
 wandb_run_name = 'gpt2_softmax' # 'run' + str(time.time())
 # data
 dataset = 'pg19_sentPieceTokenizer_vocabSize10K'
-gradient_accumulation_steps = 5 # used to simulate larger batch sizes
-batch_size = 48 # if gradient_accumulation_steps > 1, this is the micro-batch size
-block_size = 2048
+gradient_accumulation_steps = 32 # used to simulate larger batch sizes
+batch_size = 2 # if gradient_accumulation_steps > 1, this is the micro-batch size
+block_size = 8192
 # model
-n_layer = 12
-n_head = 12
+n_layer = 36
+n_head = 20
 head_dim = 64
-n_embd = 768
+n_embd = 1280
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer
@@ -63,6 +63,7 @@ max_iters = 50000 # total number of training iterations
 weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
+grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
 # learning rate decay settings
 decay_lr = True # whether to decay the learning rate
 warmup_iters = 2000 # how many steps to warm up for
@@ -162,8 +163,8 @@ if init_from == 'scratch':
 elif init_from == 'resume':
     print(f"Resuming training from {out_dir}")
     # resume training from a checkpoint.
-    ckpt_path = os.path.join(out_dir, ckpt_path)
-    checkpoint = torch.load(ckpt_path, map_location=device)
+    ckpt_p = os.path.join(out_dir, ckpt_path+'_17500.pt')
+    checkpoint = torch.load(ckpt_p, map_location=device)
     checkpoint_model_args = checkpoint['model_args']
     # force these config attributes to be equal otherwise we can't even resume training
     # the rest of the attributes (e.g. dropout) can stay as desired from command line
@@ -283,7 +284,7 @@ while True:
         #if losses['val'] < best_val_loss or always_save_checkpoint:
         if losses['val'] < best_val_loss:
             best_val_loss = losses['val']
-        if iter_num % 500 == 0:
+        if iter_num % 1000 == 0:
             if iter_num > 0:
                 checkpoint = {
                     'model': raw_model.state_dict(),
@@ -314,6 +315,10 @@ while True:
         X, Y = get_batch('train')
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward()
+    # clip the gradient
+    if grad_clip != 0.0:
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
     # step the optimizer and scaler if training in fp16
     scaler.step(optimizer)
     scaler.update()
