@@ -35,32 +35,33 @@ from model import GPTConfig, GPT
 out_dir = 'out'
 eval_interval = 250
 log_interval = 1
-eval_iters = 50
+eval_iters = 100
 global_seed = 0 # Used for reproducibilty of results
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 init_from = 'scratch' # 'scratch' or 'resume'
-ckpt_path = 'ckpt_softmax_H36_HDim64'
+ckpt_path = 'ckpt_softmaxZloss_H12_HDim64_blkSize2048'
 # wandb logging
 wandb_log = True # disabled by default
-wandb_project = 'pg19_gopher'
+wandb_project = 'pg19_flash_attn'
 wandb_run_name = 'gpt2_softmax' # 'run' + str(time.time())
 # data
 dataset = 'pg19_sentPieceTokenizer_vocabSize10K'
-gradient_accumulation_steps = 32 # used to simulate larger batch sizes
-batch_size = 2 # if gradient_accumulation_steps > 1, this is the micro-batch size
-block_size = 8192
+gradient_accumulation_steps = 8 # used to simulate larger batch sizes
+batch_size = 32 # if gradient_accumulation_steps > 1, this is the micro-batch size
+block_size = 2048
 # model
-n_layer = 36
-n_head = 20
+n_layer = 12
+n_head = 12
 head_dim = 64
-n_embd = 1280
+n_embd = 768
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer
 learning_rate = 6e-4 # max learning rate
 max_iters = 50000 # total number of training iterations
 weight_decay = 1e-1
+z_loss_weight = 1e-4
 beta1 = 0.9
 beta2 = 0.95
 grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
@@ -163,8 +164,8 @@ if init_from == 'scratch':
 elif init_from == 'resume':
     print(f"Resuming training from {out_dir}")
     # resume training from a checkpoint.
-    ckpt_p = os.path.join(out_dir, ckpt_path+'_17500.pt')
-    checkpoint = torch.load(ckpt_p, map_location=device)
+    ckpt_path = os.path.join(out_dir, ckpt_path)
+    checkpoint = torch.load(ckpt_path, map_location=device)
     checkpoint_model_args = checkpoint['model_args']
     # force these config attributes to be equal otherwise we can't even resume training
     # the rest of the attributes (e.g. dropout) can stay as desired from command line
@@ -222,8 +223,8 @@ def estimate_loss():
     out = {}
     model.eval()
     for split in ['train', 'val']:
-        losses = torch.zeros(eval_iters*gradient_accumulation_steps)
-        for k in range(eval_iters*gradient_accumulation_steps):
+        losses = torch.zeros(eval_iters)
+        for k in range(eval_iters):
             X, Y = get_batch(split)
             with ctx:
                 logits, loss = model(X, Y)
@@ -284,7 +285,7 @@ while True:
         #if losses['val'] < best_val_loss or always_save_checkpoint:
         if losses['val'] < best_val_loss:
             best_val_loss = losses['val']
-        if iter_num % 1000 == 0:
+        if iter_num % 500 == 0:
             if iter_num > 0:
                 checkpoint = {
                     'model': raw_model.state_dict(),
@@ -301,6 +302,11 @@ while True:
 
     # forward backward update, with optional gradient accumulation to simulate larger batch size
     # and using the GradScaler if data type is float16
+
+    def compute_z_loss(logits, z_loss_weight=1e-4):
+        log_z = torch.logsumexp(logits, dim=-1)  # shape: [N]
+        return z_loss_weight * (log_z ** 2).mean()
+
     for micro_step in range(gradient_accumulation_steps):
         if ddp:
             # in DDP training we only need to sync gradients at the last micro step.
@@ -310,6 +316,7 @@ while True:
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
             logits, loss = model(X, Y)
+            loss = loss + compute_z_loss(logits, z_loss_weight)
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
         X, Y = get_batch('train')
