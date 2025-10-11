@@ -27,7 +27,7 @@ import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 
-from model import GPTConfig, GPT
+from model_rope import GPTConfig, GPT
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
@@ -40,10 +40,10 @@ global_seed = 0 # Used for reproducibilty of results
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 init_from = 'scratch' # 'scratch' or 'resume'
-ckpt_path = 'ckpt_softmax_H6_HDim32_blkSize512'
+ckpt_path = 'ckpt_softmax_rope_H6_HDim32_blkSize512'
 # wandb logging
 wandb_log = True # disabled by default
-wandb_project = 'pg19_pytorch_attn'
+wandb_project = 'pg19_rope'
 wandb_run_name = 'gpt2_softmax' # 'run' + str(time.time())
 # data
 dataset = 'pg19_sentPieceTokenizer_vocabSize10K'

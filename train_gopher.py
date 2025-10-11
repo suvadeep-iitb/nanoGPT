@@ -75,7 +75,6 @@ backend = 'nccl' # 'nccl', 'gloo', etc.
 # system
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
-#dtype = 'float32'
 compile = True # use PyTorch 2.0 to compile the model to be faster
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
@@ -163,7 +162,7 @@ if init_from == 'scratch':
 elif init_from == 'resume':
     print(f"Resuming training from {out_dir}")
     # resume training from a checkpoint.
-    ckpt_p = os.path.join(out_dir, ckpt_path+'_17500.pt')
+    ckpt_p = os.path.join(out_dir, ckpt_path+'.pt')
     checkpoint = torch.load(ckpt_p, map_location=device)
     checkpoint_model_args = checkpoint['model_args']
     # force these config attributes to be equal otherwise we can't even resume training
@@ -284,7 +283,7 @@ while True:
         #if losses['val'] < best_val_loss or always_save_checkpoint:
         if losses['val'] < best_val_loss:
             best_val_loss = losses['val']
-        if iter_num % 1000 == 0:
+        if iter_num % 250 == 0:
             if iter_num > 0:
                 checkpoint = {
                     'model': raw_model.state_dict(),
@@ -295,7 +294,9 @@ while True:
                     'config': config,
                 }
                 print(f"saving checkpoint to {out_dir}")
-                torch.save(checkpoint, os.path.join(out_dir, ckpt_path+'_%s.pt'%iter_num))
+                torch.save(checkpoint, os.path.join(out_dir, ckpt_path+'.pt'))
+                if iter_num % 2000 == 0:
+                    torch.save(checkpoint, os.path.join(out_dir, ckpt_path+'_%s.pt'%iter_num))
     if iter_num == 0 and eval_only:
         break
 
