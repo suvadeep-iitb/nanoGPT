@@ -24,11 +24,11 @@ def apply_rotary_pos_emb(q, k, sin, cos):
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
 
-def get_rotary_emb(seq_len, dim, device=None, dtype=torch.float32):
+def get_rotary_emb(seq_len, dim, base=10000, device=None, dtype=torch.float32):
     if device is None:
         device = torch.device("cpu")
 
-    inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2, device=device, dtype=dtype) / dim))
+    inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, device=device, dtype=dtype) / dim))
     t = torch.arange(seq_len, device=device, dtype=dtype)
     freqs = torch.einsum('i,j->ij', t, inv_freq)
     emb = torch.cat((freqs, freqs), dim=-1)
@@ -61,6 +61,7 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.dropout = config.dropout
+        self.rope_base = config.rope_base
         # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
         if not self.flash:
@@ -79,7 +80,7 @@ class CausalSelfAttention(nn.Module):
         v = v.view(B, T, self.n_head, -1).transpose(1, 2) # (B, nh, T, hs)
 
         # Apply RoPE
-        sin, cos = get_rotary_emb(seq_len=x.size(1), dim=q.size(-1), device=x.device, dtype=q.dtype)
+        sin, cos = get_rotary_emb(seq_len=x.size(1), dim=q.size(-1), base=rope_base, device=x.device, dtype=q.dtype)
         q, k = apply_rotary_pos_emb(q, k, sin, cos)
 
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
@@ -140,6 +141,7 @@ class GPTConfig:
     n_head: int = 12
     head_dim: int = 64
     n_embd: int = 768
+    rope_base: int = 10000
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
 
