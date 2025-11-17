@@ -80,7 +80,7 @@ class CausalSelfAttention(nn.Module):
         v = v.view(B, T, self.n_head, -1).transpose(1, 2) # (B, nh, T, hs)
 
         # Apply RoPE
-        sin, cos = get_rotary_emb(seq_len=x.size(1), dim=q.size(-1), base=rope_base, device=x.device, dtype=q.dtype)
+        sin, cos = get_rotary_emb(seq_len=x.size(1), dim=q.size(-1), base=self.rope_base, device=x.device, dtype=q.dtype)
         q, k = apply_rotary_pos_emb(q, k, sin, cos)
 
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
