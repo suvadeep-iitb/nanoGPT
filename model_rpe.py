@@ -14,7 +14,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from xformers import ops as xo
+#from xformers import ops as xo
 
 
 class LayerNorm(nn.Module):
@@ -38,7 +38,10 @@ class T5RelativePositionBias(nn.Module):
         self.causal = causal
         
         # Learnable Embeddings
-        self.relative_attention_bias = nn.Embedding(num_buckets, num_heads)
+        self.relative_attention_bias = nn.Embedding(num_heads * num_buckets, 1)
+
+        head_offsets = torch.arange(num_heads) * num_buckets
+        self.register_buffer("head_offsets", head_offsets.view(1, -1, 1, 1), persistent=False)
         
         # Cache for the integer bucket indices (Not a parameter, so we use register_buffer)
         # We initialize it as None and build it on the first pass or explicit call
@@ -77,6 +80,7 @@ class T5RelativePositionBias(nn.Module):
 
         return relative_buckets + torch.where(is_small, relative_position, val_if_large)
 
+
     def _compute_and_cache_buckets(self, q_len, k_len):
         """
         Generates the (1, 1, q_len, k_len) index matrix and stores it.
@@ -97,7 +101,7 @@ class T5RelativePositionBias(nn.Module):
         # Shape: (1, 1, Q, K) - broadcastable over Batch and Heads
         self.cached_buckets = buckets.unsqueeze(0).unsqueeze(0)
 
-    def forward(self, q_len, k_len):
+    def forward(self, q_len, k_len, dtype):
         """
         Returns the bias matrix for the requested length.
         Reuses cache if possible, otherwise recomputes.
@@ -116,20 +120,21 @@ class T5RelativePositionBias(nn.Module):
         # Slice the cached indices to the current sequence length
         # slice: (1, 1, q_len, k_len)
         buckets_slice = self.cached_buckets[:, :, :q_len, :k_len]
-        
-        # Perform Embedding Lookup (Fast)
-        # buckets_slice is (1, 1, Q, K)
-        # weight is (Buckets, Heads)
-        # We use the property that Embedding works on arbitrary shaped input
-        
+
+        # 2. Add Head Offsets (Broadcasting)
+        # (1, 1, Q, K) + (1, H, 1, 1) -> (1, H, Q, K)
+        # This effectively maps every head to its specific section of the embedding table
+        indices = buckets_slice + self.head_offsets
+
+        weights = self.relative_attention_bias.weight.to(dtype) 
+
         # Output: (1, 1, Q, K, Heads) -> Permute to (1, Heads, Q, K)
-        values = self.relative_attention_bias(buckets_slice)
-        values = values.permute(0, 4, 2, 3).squeeze(0)
+        values = F.embedding(indices, weights)
         
-        return values
+        return values.squeeze(-1)
 
     @torch.no_grad()
-    def export_static_bias(self, q_len, k_len):
+    def export_static_bias(self, q_len, k_len, dtype):
         """
         For Inference ONLY: Returns the fully materialized Float tensor.
         Call this once before inference loop to get a static bias matrix.
@@ -161,6 +166,21 @@ class CausalSelfAttention(nn.Module):
             max_seq_len=self.max_distance
         )
 
+        # TIME OPTIMIZATION 2: Cache the Causal Mask
+        # Instead of recreating torch.triu every step, we store a large one.
+        self.register_buffer("cached_causal_mask", None, persistent=False)
+        self._update_causal_mask(config.block_size)
+
+    def _update_causal_mask(self, seq_len):
+        # Create a large triangular mask once
+        mask = torch.full(
+            (seq_len, seq_len),
+            float("-inf"),
+            device=self.c_attn.weight.device
+        )
+        mask = torch.triu(mask, diagonal=1)
+        self.cached_causal_mask = mask.unsqueeze(0).unsqueeze(0) # (1, 1, L, L)
+
     def forward(self, x):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
@@ -172,13 +192,15 @@ class CausalSelfAttention(nn.Module):
 
         # 2. Generate the Bias Matrix
         # Shape: (1, Heads, T, T)
-        attn_bias = self.rpe_bias(T, T)
+        attn_bias = self.rpe_bias(T, T, x.dtype)
 
-        if attn_bias.dtype != x.dtype:
-            attn_bias = attn_bias.to(x.dtype)
+        causal_mask = self.cached_causal_mask.to(x.dtype)
+
+        # Broadcast causal mask to (1, 1, T, T) so it adds to (1, Heads, T, T)
+        total_bias = attn_bias + causal_mask
 
         #y = xo.memory_efficient_attention(q, k, v, attn_bias=total_bias, p=self.dropout)
-        y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=attn_bias, dropout=self.dropout if self.training else 0, is_causal=True)
+        y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=total_bias, dropout_p=self.dropout if self.training else 0)
         y = y.transpose(1, 2).contiguous().view(B, T, self.attn_dim) # re-assemble all head outputs side by side
 
         # output projection
