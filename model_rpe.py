@@ -29,63 +29,112 @@ class LayerNorm(nn.Module):
         return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
 
 
-class T5RelativePositionBias(xo.AttentionBias):
-    """
-    Memory-efficient T5 relative position bias.
-    Does NOT construct a dense (B,H,Q,K) tensor.
-    xFormers consumes this lazily inside CUDA kernel.
-    """
-    def __init__(self, bias, num_buckets, max_distance, causal=True):
+class T5RelativePositionBias(nn.Module):
+    def __init__(self, num_heads, num_buckets=64, max_distance=128, causal=True, max_seq_len=2048):
         super().__init__()
-        self.bias = bias  # (H, num_buckets), learnable
+        self.num_heads = num_heads
         self.num_buckets = num_buckets
         self.max_distance = max_distance
         self.causal = causal
+        
+        # Learnable Embeddings
+        self.relative_attention_bias = nn.Embedding(num_buckets, num_heads)
+        
+        # Cache for the integer bucket indices (Not a parameter, so we use register_buffer)
+        # We initialize it as None and build it on the first pass or explicit call
+        self.register_buffer("cached_buckets", None, persistent=False)
+        
+        # Pre-compute initially for the max_seq_len provided
+        self._compute_and_cache_buckets(max_seq_len, max_seq_len)
 
     def _relative_position_bucket(self, relative_position):
-        num_buckets = self.num_buckets
-        max_distance = self.max_distance
-        causal = self.causal
-
+        """
+        Calculates the bucket index (integer) for a given relative distance.
+        Contains the expensive log() and math operations.
+        """
         relative_buckets = 0
-        if bidirectional:
-            num_buckets //= 2
+        
+        if not self.causal:
+            num_buckets = self.num_buckets // 2
             relative_buckets += (relative_position > 0).to(torch.long) * num_buckets
             relative_position = torch.abs(relative_position)
         else:
-            relative_position = -torch.min(relative_position, torch.zeros_like(relative_position))
-        # now relative_position is in the range [0, inf)
+            relative_position = torch.max(relative_position, torch.zeros_like(relative_position))
 
-        # half of the buckets are for exact increments in positions
-        max_exact = num_buckets // 2
+        max_exact = self.num_buckets // 2
         is_small = relative_position < max_exact
 
-        # The other half of the buckets are for logarithmically bigger bins in positions up to max_distance
-        relative_position_if_large = max_exact + (
+        val_if_large = max_exact + (
             torch.log(relative_position.float() / max_exact)
-            / math.log(max_distance / max_exact)
-            * (num_buckets - max_exact)
+            / math.log(self.max_distance / max_exact)
+            * (self.num_buckets - max_exact)
         ).to(torch.long)
-        relative_position_if_large = torch.min(
-            relative_position_if_large, torch.full_like(relative_position_if_large, num_buckets - 1)
+        
+        val_if_large = torch.min(
+            val_if_large, 
+            torch.full_like(val_if_large, self.num_buckets - 1)
         )
 
-        relative_buckets += torch.where(is_small, relative_position, relative_position_if_large)
-        return relative_buckets
+        return relative_buckets + torch.where(is_small, relative_position, val_if_large)
 
-
-    def materialize(self, shape, dtype=None, device=None):
+    def _compute_and_cache_buckets(self, q_len, k_len):
         """
-        xFormers only calls this for debugging; not used in FlashAttention path.
+        Generates the (1, 1, q_len, k_len) index matrix and stores it.
         """
-        B, H, Q, K = shape
-        q_pos = torch.arange(Q, device=device).unsqueeze(1)
-        k_pos = torch.arange(K, device=device).unsqueeze(0)
+        device = self.relative_attention_bias.weight.device
+        
+        # 1. Generate grids
+        q_pos = torch.arange(q_len, dtype=torch.long, device=device)[:, None]
+        k_pos = torch.arange(k_len, dtype=torch.long, device=device)[None, :]
+        
+        # 2. Calculate distances
+        rel_pos = q_pos - k_pos
+        
+        # 3. Calculate buckets (Expensive part)
+        buckets = self._relative_position_bucket(rel_pos)
+        
+        # 4. Reshape and Cache
+        # Shape: (1, 1, Q, K) - broadcastable over Batch and Heads
+        self.cached_buckets = buckets.unsqueeze(0).unsqueeze(0)
 
-        rp = k_pos - q_pos
-        buckets = self._relative_position_bucket(rp)           # (Q, K)
-        per_head = self.bias[:, buckets]                       # (H, Q, K)
-        return per_head.unsqueeze(0)
+    def forward(self, q_len, k_len):
+        """
+        Returns the bias matrix for the requested length.
+        Reuses cache if possible, otherwise recomputes.
+        """
+        # Check if we need to recompute the cache
+        # (e.g., if current sequence is longer than what we have cached)
+        cache_q = self.cached_buckets.shape[2]
+        cache_k = self.cached_buckets.shape[3]
+        
+        if q_len > cache_q or k_len > cache_k:
+            # Recompute cache for the new larger size
+            # We usually double the size or just match the new max to avoid frequent resizing
+            new_max = max(q_len, k_len, cache_q * 2)
+            self._compute_and_cache_buckets(new_max, new_max)
+
+        # Slice the cached indices to the current sequence length
+        # slice: (1, 1, q_len, k_len)
+        buckets_slice = self.cached_buckets[:, :, :q_len, :k_len]
+        
+        # Perform Embedding Lookup (Fast)
+        # buckets_slice is (1, 1, Q, K)
+        # weight is (Buckets, Heads)
+        # We use the property that Embedding works on arbitrary shaped input
+        
+        # Output: (1, 1, Q, K, Heads) -> Permute to (1, Heads, Q, K)
+        values = self.relative_attention_bias(buckets_slice)
+        values = values.permute(0, 4, 2, 3).squeeze(0)
+        
+        return values
+
+    @torch.no_grad()
+    def export_static_bias(self, q_len, k_len):
+        """
+        For Inference ONLY: Returns the fully materialized Float tensor.
+        Call this once before inference loop to get a static bias matrix.
+        """
+        return self.forward(q_len, k_len)
 
 
 class CausalSelfAttention(nn.Module):
@@ -106,13 +155,10 @@ class CausalSelfAttention(nn.Module):
         self.num_buckets = config.rel_pos_num_buckets
         self.max_distance = config.rel_pos_max_distance
 
-        # Learned T5 bias
-        t5_bias = torch.nn.Parameter(torch.zeros(self.n_head, self.num_buckets, device="cuda"))
-        self.rel_bias_module = T5RelativePositionBias(
-            bias=t5_bias, 
+        self.rpe_bias = T5RelativePositionBias(
+            num_heads=self.n_head, 
             num_buckets=self.num_buckets, 
-            max_distance=self.max_distance,
-            causal=True
+            max_seq_len=self.max_distance
         )
 
     def forward(self, x):
@@ -120,12 +166,20 @@ class CausalSelfAttention(nn.Module):
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
         q, k, v  = self.c_attn(x).split(self.attn_dim, dim=2)
-        k = k.view(B, T, self.n_head, -1)
-        q = q.view(B, T, self.n_head, -1)
-        v = v.view(B, T, self.n_head, -1)
-        
-        y = xo.memory_efficient_attention(q, k, v, attn_bias=self.rel_bias_module, p=self.dropout)
-        y = y.contiguous().view(B, T, self.attn_dim) # re-assemble all head outputs side by side
+        k = k.view(B, T, self.n_head, -1).transpose(1, 2)
+        q = q.view(B, T, self.n_head, -1).transpose(1, 2)
+        v = v.view(B, T, self.n_head, -1).transpose(1, 2)
+
+        # 2. Generate the Bias Matrix
+        # Shape: (1, Heads, T, T)
+        attn_bias = self.rpe_bias(T, T)
+
+        if attn_bias.dtype != x.dtype:
+            attn_bias = attn_bias.to(x.dtype)
+
+        #y = xo.memory_efficient_attention(q, k, v, attn_bias=total_bias, p=self.dropout)
+        y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=attn_bias, dropout=self.dropout if self.training else 0, is_causal=True)
+        y = y.transpose(1, 2).contiguous().view(B, T, self.attn_dim) # re-assemble all head outputs side by side
 
         # output projection
         y = self.resid_dropout(self.c_proj(y))
