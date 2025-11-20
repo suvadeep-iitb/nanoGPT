@@ -40,7 +40,7 @@ global_seed = 0 # Used for reproducibilty of results
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 init_from = 'scratch' # 'scratch' or 'resume'
-ckpt_path = 'ckpt_softmax_H12_HDim64_blkSize8192'
+ckpt_path = 'ckpt_softmax_alibi_H12_HDim64_blkSize8192'
 # wandb logging
 wandb_log = True # disabled by default
 wandb_project = 'pg19_alibi'
