@@ -177,7 +177,7 @@ class CausalSelfAttention(nn.Module):
             (seq_len, seq_len),
             float("-inf"),
             device=self.c_attn.weight.device
-        )
+        ).to(torch.bfloat16)
         mask = torch.triu(mask, diagonal=1)
         self.cached_causal_mask = mask.unsqueeze(0).unsqueeze(0) # (1, 1, L, L)
 
@@ -192,12 +192,10 @@ class CausalSelfAttention(nn.Module):
 
         # 2. Generate the Bias Matrix
         # Shape: (1, Heads, T, T)
-        attn_bias = self.rpe_bias(T, T, x.dtype)
-
-        causal_mask = self.cached_causal_mask.to(x.dtype)
+        attn_bias = self.rpe_bias(T, T, torch.bfloat16)
 
         # Broadcast causal mask to (1, 1, T, T) so it adds to (1, Heads, T, T)
-        total_bias = attn_bias + causal_mask
+        total_bias = attn_bias + self.cached_causal_mask
 
         #y = xo.memory_efficient_attention(q, k, v, attn_bias=total_bias, p=self.dropout)
         y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=total_bias, dropout_p=self.dropout if self.training else 0)
