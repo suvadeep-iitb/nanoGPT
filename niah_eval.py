@@ -1,6 +1,6 @@
 import torch
 from rouge_score import rouge_scorer
-#from bert_score import BERTScorer
+from bert_score import BERTScorer
 import numpy as np
 from contextlib import nullcontext
 
@@ -12,28 +12,28 @@ torch.cuda.manual_seed(seed)
 torch.cuda.manual_seed_all(seed)
 
 # Ensures deterministic algorithms where possible
-torch.use_deterministic_algorithms(True)
+#torch.use_deterministic_algorithms(True)
 
 # cuDNN settings (important)
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
+#torch.backends.cudnn.deterministic = True
+#torch.backends.cudnn.benchmark = False
 
 
 #####################################################################################################################
 #####################################################################################################################
 # Setup Scorers
 r_scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
-#b_scorer = BERTScorer(lang="en", rescale_with_baseline=True)
+b_scorer = BERTScorer(lang="en", rescale_with_baseline=True)
 
 #####################################################################################################################
 #####################################################################################################################
 # Define NIAH Parameters
 DEPTH_PERCENTS = [0, 25, 50, 75, 100] # Location of needle
 MAX_NEW_TOKENS = 5
-BLOCK_SIZE = 2048
-N_TRIALS = 2
-NEEDLE_REPEAT = 2
-model_type = 'softmax_ape'
+BLOCK_SIZE = 8192
+N_TRIALS = 8
+NEEDLE_REPEAT = 1
+model_type = 'softmax_rope'
 
 #####################################################################################################################
 #####################################################################################################################
@@ -47,7 +47,8 @@ tokenizer = spm.SentencePieceProcessor(model_file="data/pg19_sentPieceTokenizer_
 device = 'cuda' 
 dtype = 'bfloat16' 
 
-ckpt_path = ''
+ckpt_idx = 16000
+ckpt_path = f'out/ckpt_softmaxRoPE_H12_L12_HDim64_blkSize{BLOCK_SIZE}_{ckpt_idx}.pt'
 data_path = 'data/pg19_sentPieceTokenizer_vocabSize10K/sent_tokenized_pg19_validation.pt'
 
 block_size = BLOCK_SIZE
@@ -60,7 +61,7 @@ dropout = 0.0
 bias = False
 
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
-ctx = nullcontext() if device == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+ctx = nullcontext() if device == 'cpu' else torch.amp.autocast(device_type=device, dtype=ptdtype)
 
 if model_type == 'softmax_ape':
     from model import GPTConfig, GPT
@@ -103,13 +104,14 @@ else:
 checkpoint = torch.load(ckpt_path, map_location=device)
 checkpoint_model_args = checkpoint['model_args']
 for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
-    assert model_args[k] == checkpoint_model_args[k]
+    assert model_args[k] == checkpoint_model_args[k], (f'model arg: {model_args[k]}, checkpoint arg: {checkpoint_model_args[k]}')
 state_dict = checkpoint['model']
 unwanted_prefix = '_orig_mod.'
 for k,v in list(state_dict.items()):
     if k.startswith(unwanted_prefix):
         state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
 model.load_state_dict(state_dict)
+model.eval()
 model.to(device)
 
 #####################################################################################################################
@@ -150,7 +152,7 @@ def get_context(needle_tokens, question_tokens, filler_data, n_trials, depth, ne
             filler_sent = filler_sent[filler_sent>0]
         filler_sent = torch.concat([torch.tensor([0]), filler_sent], dim=0)
 
-        return filler_context, filler_sent
+        return filler_context.to(device), filler_sent.to(device)
 
     context_with_needle_list = []
     context_without_needle_list = []
@@ -193,7 +195,7 @@ def calculate_answer_perplexity(context, answer):
     # In Causal LM, the logit at index i predicts the token at index i+1
     target_len = answer.shape[-1]
 
-    with torch.no_grad():
+    with torch.no_grad(), ctx:
         logits, _ = model(full_ids)
 
     # 3. Align Logits and Targets
@@ -236,7 +238,7 @@ def evaluate_niah(needle_data, filler_data, n_trials, depth, NEEDLE_REPEAT, BLOC
     # Generate Completion
     context_with_needle = context_with_needle.to(device)
     context_length = context_with_needle.shape[-1]
-    with torch.no_grad():
+    with torch.no_grad(), ctx:
         output_ids = model.generate(context_with_needle, max_new_tokens=MAX_NEW_TOKENS, temperature=1.0, top_k=1)
     generated_texts = [
         tokenizer.decode(ids.tolist())
@@ -285,11 +287,11 @@ def run_robust_eval():
             results['model_args'] = model_args
 
             if model_type == 'softmax_ape':
-                save_file = f'res_niah_depth{depth}_needle{n}_blockSize{BLOCK_SIZE}_{model_type}_L{n_layer}_H{n_head}.pt'
+                save_file = f'res_niah_depth{depth}_needle{n}_blockSize{BLOCK_SIZE}_{model_type}_L{n_layer}_H{n_head}_{ckpt_idx}.pt'
             elif model_type == 'softmax_rope':
-                save_file = f'res_niah_depth{depth}_needle{n}_blockSize{BLOCK_SIZE}_{model_type}_L{n_layer}_H{n_head}_rbase{rope_base}.pt'
+                save_file = f'res_niah_depth{depth}_needle{n}_blockSize{BLOCK_SIZE}_{model_type}_L{n_layer}_H{n_head}_rbase{rope_base}_{ckpt_idx}.pt'
             elif model_type == 'softmaxLocalAttn_ape':
-                save_file = f'res_niah_depth{depth}_needle{n}_blockSize{BLOCK_SIZE}_{model_type}_L{n_layer}_H{n_head}_local{n_local_head}_global{n_global_head}.pt'
+                save_file = f'res_niah_depth{depth}_needle{n}_blockSize{BLOCK_SIZE}_{model_type}_L{n_layer}_H{n_head}_local{n_local_head}_global{n_global_head}_{ckpt_idx}.pt'
             else:
                 raise ValueError(f"Unknown model_type: {model_type}")
             torch.save(results, save_file)
