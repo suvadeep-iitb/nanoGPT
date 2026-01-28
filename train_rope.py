@@ -40,21 +40,21 @@ global_seed = 0 # Used for reproducibilty of results
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 init_from = 'scratch' # 'scratch' or 'resume'
-ckpt_path = 'ckpt_softmax_rope_H6_HDim32_blkSize8K'
+ckpt_path = 'ckpt_softmax_rope_H12_HDim64_blkSize8K'
 # wandb logging
 wandb_log = True # disabled by default
 wandb_project = 'pg19_rope'
 wandb_run_name = 'gpt2_softmax' # 'run' + str(time.time())
 # data
 dataset = 'pg19_sentPieceTokenizer_vocabSize10K'
-gradient_accumulation_steps = 2 # used to simulate larger batch sizes
-batch_size = 32 # if gradient_accumulation_steps > 1, this is the micro-batch size
+gradient_accumulation_steps = 8 # used to simulate larger batch sizes
+batch_size = 8 # if gradient_accumulation_steps > 1, this is the micro-batch size
 block_size = 8192
 # model
-n_layer = 6
-n_head = 6
-head_dim = 32
-n_embd = 192
+n_layer = 12
+n_head = 12
+head_dim = 64
+n_embd = 768
 rope_base = 10000 * (block_size // 2048)
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
