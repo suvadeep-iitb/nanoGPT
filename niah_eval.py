@@ -30,10 +30,11 @@ b_scorer = BERTScorer(lang="en", rescale_with_baseline=True)
 # Define NIAH Parameters
 DEPTH_PERCENTS = [0, 25, 50, 75, 100] # Location of needle
 MAX_NEW_TOKENS = 5
-BLOCK_SIZE = 8192
-N_TRIALS = 8
+BLOCK_SIZE = 32768
+N_TRIALS = 64
 NEEDLE_REPEAT = 1
-model_type = 'softmax_rope'
+model_type = 'softmaxLocalAttn_ape'
+BATCH_SIZE = 16
 
 #####################################################################################################################
 #####################################################################################################################
@@ -48,7 +49,9 @@ device = 'cuda'
 dtype = 'bfloat16' 
 
 ckpt_idx = 16000
-ckpt_path = f'out/ckpt_softmaxRoPE_H12_L12_HDim64_blkSize{BLOCK_SIZE}_{ckpt_idx}.pt'
+#ckpt_path = f'out/ckpt_softmaxAPE_L12_H12_HDim64_blkSize{BLOCK_SIZE}_fp32_{ckpt_idx}.pt'
+#ckpt_path = f'out/ckpt_softmaxRoPE_H12_L12_HDim64_blkSize{BLOCK_SIZE}_{ckpt_idx}.pt'
+ckpt_path = f'out/ckpt_softmaxLocalAttnAPE_L12_H12_HDim64_attnSpan100_blkSize{BLOCK_SIZE}_{ckpt_idx}.pt'
 data_path = 'data/pg19_sentPieceTokenizer_vocabSize10K/sent_tokenized_pg19_validation.pt'
 
 block_size = BLOCK_SIZE
@@ -159,10 +162,16 @@ def get_context(needle_tokens, question_tokens, filler_data, n_trials, depth, ne
     for t in range(n_trials):
         context_without_needle, sent_idx = get_filler_context(filler_data, filler_length)
         if depth == 0:
-            context_with_needle = torch.concat([repeated_needle, context_without_needle], dim=0)
+            # Find the end of first sentence
+            insertion_idx = sent_idx[1]
+            context_with_needle = torch.concat(
+                [context_without_needle[:insertion_idx], repeated_needle, context_without_needle[insertion_idx:]], 
+                dim=0
+            )
         elif depth == 100:
             context_with_needle = torch.concat([context_without_needle, repeated_needle], dim=0)
         else:
+            # Find an index between two sentences
             insertion_idx = int(context_without_needle.shape[0] * (depth / 100))
             idx = torch.searchsorted(sent_idx, insertion_idx, right=True)
             insertion_idx = sent_idx[idx] if (sent_idx[idx] - insertion_idx) < (insertion_idx - sent_idx[idx-1]) else sent_idx[idx-1]
@@ -195,23 +204,23 @@ def calculate_answer_perplexity(context, answer):
     # In Causal LM, the logit at index i predicts the token at index i+1
     target_len = answer.shape[-1]
 
-    with torch.no_grad(), ctx:
-        logits, _ = model(full_ids)
-
-    # 3. Align Logits and Targets
-    # We need the logits that correspond to the positions predicting the answer
-    # If full_ids has length N, and ans_ids has length M:
-    # The first token of the answer is at index N-M.
-    # It is predicted by the logit at index N-M-1.
-    shift_logits = logits[..., -(target_len + 1):-1, :].contiguous()
+    shift_logits = []
+    for b_start in range(0, N_TRIALS, BATCH_SIZE):
+        b_end = min(b_start + BATCH_SIZE, N_TRIALS)
+        with torch.no_grad(), ctx:
+            logits, _ = model(full_ids[b_start: b_end])
+        shift_logits.append(logits[..., -(target_len + 1):-1, :].contiguous())
+    shift_logits = torch.concat(shift_logits, dim=0)
     shift_labels = full_ids[..., -target_len:].contiguous()
 
     # 4. Calculate Loss
     loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
     token_losses = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
 
-    batch_losses = token_losses.view(shift_logits.size(0), -1).mean(dim=1)
-    batch_ppls = torch.exp(batch_losses).cpu()
+    token_losses = token_losses.view(shift_logits.size(0), -1)
+    batch_losses = token_losses.mean(dim=-1)
+    print(batch_losses.to(torch.float32).cpu().numpy())
+    batch_ppls = torch.exp(batch_losses.to(torch.float32)).cpu()
 
     return batch_ppls
 
@@ -238,8 +247,14 @@ def evaluate_niah(needle_data, filler_data, n_trials, depth, NEEDLE_REPEAT, BLOC
     # Generate Completion
     context_with_needle = context_with_needle.to(device)
     context_length = context_with_needle.shape[-1]
-    with torch.no_grad(), ctx:
-        output_ids = model.generate(context_with_needle, max_new_tokens=MAX_NEW_TOKENS, temperature=1.0, top_k=1)
+
+    output_ids = []
+    for b_start in range(0, N_TRIALS, BATCH_SIZE):
+        b_end = min(b_start + BATCH_SIZE, N_TRIALS)
+        with torch.no_grad(), ctx:
+            out_ids = model.generate(context_with_needle[b_start: b_end], max_new_tokens=MAX_NEW_TOKENS, temperature=1.0, top_k=1)
+        output_ids.append(out_ids)
+    output_ids = torch.concat(output_ids, dim=0)
     generated_texts = [
         tokenizer.decode(ids.tolist())
         for ids in output_ids[:, context_length:]
@@ -279,6 +294,7 @@ NEEDLE_POOL = [
 def run_robust_eval():
     for depth in DEPTH_PERCENTS:
         for n, needle_data in enumerate(NEEDLE_POOL):
+            print(f'DEP: {depth} NDL: {n}')
             results = evaluate_niah(needle_data, filler_data, N_TRIALS, depth, NEEDLE_REPEAT, BLOCK_SIZE, MAX_NEW_TOKENS)
             results['depth'] = depth
             results['needle_data'] = needle_data
@@ -295,6 +311,7 @@ def run_robust_eval():
             else:
                 raise ValueError(f"Unknown model_type: {model_type}")
             torch.save(results, save_file)
+            print()
 
 
 run_robust_eval()
