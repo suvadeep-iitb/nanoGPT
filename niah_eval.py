@@ -30,11 +30,11 @@ b_scorer = BERTScorer(lang="en", rescale_with_baseline=True)
 # Define NIAH Parameters
 DEPTH_PERCENTS = [0, 25, 50, 75, 100] # Location of needle
 MAX_NEW_TOKENS = 5
-BLOCK_SIZE = 32768
+BLOCK_SIZE = 8192
 N_TRIALS = 64
 NEEDLE_REPEAT = 1
 model_type = 'softmaxLocalAttn_ape'
-BATCH_SIZE = 16
+BATCH_SIZE = 32
 
 #####################################################################################################################
 #####################################################################################################################
@@ -46,17 +46,38 @@ tokenizer = spm.SentencePieceProcessor(model_file="data/pg19_sentPieceTokenizer_
 #####################################################################################################################
 # Setup Model Parameters
 device = 'cuda' 
-dtype = 'bfloat16' 
+dtype = 'bfloat16'
 
-ckpt_idx = 16000
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--n_head", type=int, default=2, help="number of attention heads")
+parser.add_argument("--n_global_head", type=int, default=1, help="number of global attention heads")
+parser.add_argument("--local_attn_span", type=int, default=100, help="number of global attention heads")
+parser.add_argument("--ckpt_idx", type=int, default=8000, help="checkpoint index")
+
+args = parser.parse_args()
+
+n_head = args.n_head
+n_global_head = args.n_global_head
+local_attn_span = args.local_attn_span
+ckpt_idx = args.ckpt_idx
+
+print(f"n_head = {n_head}, ckpt_idx = {ckpt_idx}\n\n\n\n\n")
+
+#ckpt_idx = 8000
+#n_head = 2
+#n_global_head = 1
 #ckpt_path = f'out/ckpt_softmaxAPE_L12_H12_HDim64_blkSize{BLOCK_SIZE}_fp32_{ckpt_idx}.pt'
+#ckpt_path = f'out/ckpt_softmaxAPE_L12_H12_HDim64_blkSize{BLOCK_SIZE}_dropout_{ckpt_idx}.pt'
+#ckpt_path = f'out/ckpt_softmaxAPE_L12_H12_HDim64_blkSize{BLOCK_SIZE}_MLPdropout_{ckpt_idx}.pt'
 #ckpt_path = f'out/ckpt_softmaxRoPE_H12_L12_HDim64_blkSize{BLOCK_SIZE}_{ckpt_idx}.pt'
-ckpt_path = f'out/ckpt_softmaxLocalAttnAPE_L12_H12_HDim64_attnSpan100_blkSize{BLOCK_SIZE}_{ckpt_idx}.pt'
+ckpt_path = f'out/ckpt_softmaxLocalAttnAPE_L12_H{n_head}_G{n_global_head}_HDim64_attnSpan{local_attn_span}_blkSize{BLOCK_SIZE}_FCdropout_{ckpt_idx}.pt'
+#ckpt_path = f'out/ckpt_softmaxLocalAttnAPE_L12_H{n_head}_G{n_global_head}_HDim64_attnSpan{local_attn_span}_blkSize{BLOCK_SIZE}_{ckpt_idx}.pt'
 data_path = 'data/pg19_sentPieceTokenizer_vocabSize10K/sent_tokenized_pg19_validation.pt'
 
 block_size = BLOCK_SIZE
 n_layer = 12
-n_head = 12
 head_dim = 64
 n_embd = 768
 vocab_size = 10000
@@ -88,9 +109,7 @@ elif model_type == 'softmax_rope':
 elif model_type == 'softmaxLocalAttn_ape': 
     from model_localAttn import GPTConfig, GPT
 
-    n_global_head = 1
     n_local_head = n_head - n_global_head
-    local_attn_span = 100
     model_args = dict(n_layer=n_layer, n_embd=n_embd, n_head=n_head, head_dim=head_dim, 
                       n_local_head=n_local_head, local_attn_span=local_attn_span, 
                       block_size=block_size, bias=bias, vocab_size=vocab_size, 
@@ -303,11 +322,11 @@ def run_robust_eval():
             results['model_args'] = model_args
 
             if model_type == 'softmax_ape':
-                save_file = f'res_niah_depth{depth}_needle{n}_blockSize{BLOCK_SIZE}_{model_type}_L{n_layer}_H{n_head}_{ckpt_idx}.pt'
+                save_file = f'res_niah_depth{depth}_needle{n}_blockSize{BLOCK_SIZE}_{model_type}_L{n_layer}_H{n_head}_MLPdropout_{ckpt_idx}.pt'
             elif model_type == 'softmax_rope':
                 save_file = f'res_niah_depth{depth}_needle{n}_blockSize{BLOCK_SIZE}_{model_type}_L{n_layer}_H{n_head}_rbase{rope_base}_{ckpt_idx}.pt'
             elif model_type == 'softmaxLocalAttn_ape':
-                save_file = f'res_niah_depth{depth}_needle{n}_blockSize{BLOCK_SIZE}_{model_type}_L{n_layer}_H{n_head}_local{n_local_head}_global{n_global_head}_{ckpt_idx}.pt'
+                save_file = f'res_niah_depth{depth}_needle{n}_blockSize{BLOCK_SIZE}_{model_type}_L{n_layer}_H{n_head}_local{n_local_head}_global{n_global_head}_attnSpan{local_attn_span}_{ckpt_idx}.pt'
             else:
                 raise ValueError(f"Unknown model_type: {model_type}")
             torch.save(results, save_file)
