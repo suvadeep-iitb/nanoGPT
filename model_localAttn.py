@@ -15,6 +15,8 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
+from flash_attn import flash_attn_qkvpacked_func, flash_attn_func, flash_attn_varlen_qkvpacked_func
+
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
 
@@ -30,52 +32,113 @@ class CausalSelfAttention(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        # key, query, value projections for all heads, but in a batch
-        self.attn_dim = config.head_dim * config.n_head
-        self.c_attn = nn.Linear(config.n_embd, 3 * self.attn_dim, bias=config.bias)
+        self.n_head = config.n_head
+        self.head_dim = config.head_dim
+        self.n_embd = config.n_embd
+        self.dropout = config.dropout
+        self.n_local_head = config.n_local_head
+        self.n_global_head = self.n_head - self.n_local_head
+        self.local_attn_span = config.local_attn_span
+        self.local_attn_dim = self.head_dim * self.n_local_head
+        self.global_attn_dim = self.head_dim * self.n_global_head
+        if self.n_local_head > 0:
+            # key, query, value projections for local head, but in a batch
+            self.c_local_attn = nn.Linear(config.n_embd, 3 * self.local_attn_dim, bias=config.bias)
+        if self.n_global_head > 0:
+            # key, query, value projections for global head, but in a batch
+            self.c_global_attn = nn.Linear(config.n_embd, 3 * self.global_attn_dim, bias=config.bias)
         # output projection
-        self.c_proj = nn.Linear(self.attn_dim, config.n_embd, bias=config.bias)
+        self.c_proj = nn.Linear(self.local_attn_dim+self.global_attn_dim, config.n_embd, bias=config.bias)
         # regularization
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
-        self.n_head = config.n_head
-        self.n_embd = config.n_embd
-        self.dropout = config.dropout
-        # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
-        self.flash = False #hasattr(torch.nn.functional, 'scaled_dot_product_attention')
-        # causal mask to ensure that attention is only applied to the left in the input sequence
-        local_att_mask = torch.tril(torch.ones([config.block_size, config.block_size]), 0) \
-                * (1.0 - torch.tril(torch.ones([config.block_size, config.block_size]), -config.local_attn_span))
-        causal_mask = torch.tril(torch.ones(config.block_size, config.block_size))
-        bias = torch.stack([local_att_mask]*config.n_local_head + [causal_mask]*(self.n_head-config.n_local_head), dim=0)
-        mask = bias.bool()
-        self.register_buffer("mask", mask.view(1, self.n_head, config.block_size, config.block_size))
+        self.softmax_scale = 1.0/math.sqrt(self.head_dim)
 
-    def forward(self, x):
-        B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
+    def forward(self, x, attention_mask=None):
+        B, T, C = x.size()
+    
+        # 1. Handle Unpadding Metadata
+        if attention_mask is not None:
+            from flash_attn.bert_padding import unpad_input, pad_input
+            # We use a dummy unpad to get indices/cu_seqlens for the whole batch
+            # This is more efficient than unpadding local/global separately
+            _, indices, cu_seqlens, max_seqlen = unpad_input(x, attention_mask)[:4]
+    
+        y_local, y_global = None, None
 
-        # calculate query, key, values for all heads in batch and move head forward to be the batch dim
-        q, k, v  = self.c_attn(x).split(self.attn_dim, dim=2)
-        k = k.view(B, T, self.n_head, -1).transpose(1, 2) # (B, nh, T, hs)
-        q = q.view(B, T, self.n_head, -1).transpose(1, 2) # (B, nh, T, hs)
-        v = v.view(B, T, self.n_head, -1).transpose(1, 2) # (B, nh, T, hs)
+        # 2. Local Attention Path
+        if self.n_local_head > 0:
+            qkv_local = self.c_local_attn(x).view(B, T, 3, self.n_local_head, -1)
+        
+            if attention_mask is not None:
+                # Flatten, Unpad, and View for Varlen
+                qkv_l_unpad = unpad_input(qkv_local.reshape(B, T, -1), attention_mask)[0]
+                qkv_l_unpad = qkv_l_unpad.view(-1, 3, self.n_local_head, self.head_dim)
 
-        # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
-        if self.flash:
-            # efficient attention using Flash Attention CUDA kernels
-            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=self.mask, dropout_p=self.dropout if self.training else 0)
+                qkv_l_unpad = qkv_l_unpad.to(torch.bfloat16)
+                y_l_unpad = flash_attn_varlen_qkvpacked_func(
+                    qkv_l_unpad, 
+                    cu_seqlens=cu_seqlens, 
+                    max_seqlen=max_seqlen,
+                    dropout_p=self.dropout if self.training else 0,
+                    softmax_scale=self.softmax_scale, 
+                    causal=True,
+                    window_size=(self.local_attn_span, 0), # Sliding window applied here
+                    deterministic=True
+                )
+                y_l_unpad = y_l_unpad.to(x.dtype)
+
+                y_local = pad_input(y_l_unpad.reshape(-1, self.n_local_head * self.head_dim), indices, B, T)
+                y_local = y_local.view(B, T, self.n_local_head, self.head_dim)
+            else:
+                qkv_local = qkv_local.to(torch.bfloat16)
+                y_local = flash_attn_qkvpacked_func(
+                    qkv_local, dropout_p=self.dropout if self.training else 0,
+                    softmax_scale=self.softmax_scale, causal=True,
+                    window_size=(self.local_attn_span, 0), deterministic=True
+                )
+                y_local = y_local.to(x.dtype)
+
+        # 3. Global Attention Path
+        if self.n_global_head > 0:
+            qkv_global = self.c_global_attn(x).view(B, T, 3, self.n_global_head, -1)
+        
+            if attention_mask is not None:
+                qkv_g_unpad = unpad_input(qkv_global.reshape(B, T, -1), attention_mask)[0]
+                qkv_g_unpad = qkv_g_unpad.view(-1, 3, self.n_global_head, self.head_dim)
+
+                qkv_g_unpad = qkv_g_unpad.to(torch.bfloat16)
+                y_g_unpad = flash_attn_varlen_qkvpacked_func(
+                    qkv_g_unpad, 
+                    cu_seqlens=cu_seqlens, 
+                    max_seqlen=max_seqlen,
+                    dropout_p=self.dropout if self.training else 0,
+                    softmax_scale=self.softmax_scale, 
+                    causal=True,
+                    deterministic=True
+                )
+                y_g_unpad = y_g_unpad.to(x.dtype)
+
+                y_global = pad_input(y_g_unpad.reshape(-1, self.n_global_head * self.head_dim), indices, B, T)
+                y_global = y_global.view(B, T, self.n_global_head, self.head_dim)
+            else:
+                qkv_global = qkv_global.to(torch.bfloat16)
+                y_global = flash_attn_qkvpacked_func(
+                    qkv_global, dropout_p=self.dropout if self.training else 0,
+                    softmax_scale=self.softmax_scale, causal=True, deterministic=True
+                )
+                y_global = y_global.to(x.dtype)
+
+        # 4. Combine and Project
+        if y_local is not None and y_global is not None:
+            y = torch.cat([y_local, y_global], dim=-2)
         else:
-            # manual implementation of attention
-            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            att = att.masked_fill(self.mask[:,:,:T,:T] == False, float('-inf'))
-            att = F.softmax(att, dim=-1)
-            att = self.attn_dropout(att)
-            y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
-        y = y.transpose(1, 2).contiguous().view(B, T, self.attn_dim) # re-assemble all head outputs side by side
-
-        # output projection
+            y = y_local if y_local is not None else y_global
+        
+        y = y.contiguous().view(B, T, -1)
         y = self.resid_dropout(self.c_proj(y))
         return y
+
 
 class MLP(nn.Module):
 
@@ -105,8 +168,8 @@ class Block(nn.Module):
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
 
-    def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
+    def forward(self, x, attention_mask=None):
+        x = x + self.attn(self.ln_1(x), attention_mask)
         x = x + self.mlp(self.ln_2(x))
         return x
 
@@ -175,7 +238,7 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None, attention_mask=None):
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
@@ -186,7 +249,7 @@ class GPT(nn.Module):
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
         for block in self.transformer.h:
-            x = block(x)
+            x = block(x, attention_mask)
         x = self.transformer.ln_f(x)
 
         if targets is not None:
@@ -311,17 +374,26 @@ class GPT(nn.Module):
         return mfu
 
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None, attention_mask=None):
         """
         Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
         the sequence max_new_tokens times, feeding the predictions back into the model each time.
         Most likely you'll want to make sure to be in model.eval() mode of operation for this.
         """
+        if attention_mask is None:
+            attention_mask = torch.ones_like(idx)
+
         for _ in range(max_new_tokens):
             # if the sequence context is growing too long we must crop it at block_size
-            idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+            #idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+            if idx.size(1) > self.config.block_size:
+                idx_cond = idx[:, -self.config.block_size:]
+                mask_cond = attention_mask[:, -self.config.block_size:]
+            else:
+                idx_cond = idx
+                mask_cond = attention_mask
             # forward the model to get the logits for the index in the sequence
-            logits, _ = self(idx_cond)
+            logits, _ = self(idx_cond, attention_mask=mask_cond)
             # pluck the logits at the final step and scale by desired temperature
             logits = logits[:, -1, :] / temperature
             # optionally crop the logits to only the top k options
@@ -334,5 +406,7 @@ class GPT(nn.Module):
             idx_next = torch.multinomial(probs, num_samples=1)
             # append sampled index to the running sequence and continue
             idx = torch.cat((idx, idx_next), dim=1)
+            new_mask = torch.ones((attention_mask.size(0), 1), device=attention_mask.device, dtype=attention_mask.dtype)
+            attention_mask = torch.cat((attention_mask, new_mask), dim=1)
 
         return idx
