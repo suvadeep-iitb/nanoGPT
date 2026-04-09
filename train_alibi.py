@@ -40,21 +40,22 @@ global_seed = 0 # Used for reproducibilty of results
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 init_from = 'scratch' # 'scratch' or 'resume'
-ckpt_path = 'ckpt_softmax_alibi_H12_HDim64_blkSize8192'
+ckpt_path = 'ckpt_softmaxALiBi_H36_HDim64'
 # wandb logging
 wandb_log = True # disabled by default
-wandb_project = 'pg19_alibi'
-wandb_run_name = 'gpt2_softmax' # 'run' + str(time.time())
+wandb_project = 'opt_bumblebee'
+wandb_run_name = 'gpt2_softmaxALiBi_H36_HDim64' # 'run' + str(time.time())
 # data
-dataset = 'pg19_sentPieceTokenizer_vocabSize10K'
-gradient_accumulation_steps = 5 # used to simulate larger batch sizes
-batch_size = 12 # if gradient_accumulation_steps > 1, this is the micro-batch size
+dataset = 'openwebtext'
+gradient_accumulation_steps = 8 # used to simulate larger batch sizes
+batch_size = 8 # if gradient_accumulation_steps > 1, this is the micro-batch size
 block_size = 8192
 # model
 n_layer = 12
 n_head = 12
 head_dim = 64
 n_embd = 768
+rope_base = 10000 * (block_size // 2048)
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer
@@ -249,9 +250,9 @@ def get_lr(it):
 if wandb_log and master_process:
     import wandb
     if init_from == 'resume':
-        wandb.init(project=wandb_project, name=wandb_run_name, config=config, resume="allow")
+        wandb.init(project=wandb_project, name=wandb_run_name, config=config, resume="allow", mode="offline")
     else:
-        wandb.init(project=wandb_project, name=wandb_run_name, config=config)
+        wandb.init(project=wandb_project, name=wandb_run_name, config=config, mode="offline")
 
 # training loop
 X, Y = get_batch('train') # fetch the very first batch
@@ -295,8 +296,19 @@ while True:
                 }
                 print(f"saving checkpoint to {out_dir}")
                 torch.save(checkpoint, os.path.join(out_dir, ckpt_path+'.pt'))
-                if iter_num % 2000 == 0:
+                if iter_num % 8000 == 0:
                     torch.save(checkpoint, os.path.join(out_dir, ckpt_path+'_%s.pt'%iter_num))
+                elif iter_num % 2000 == 0:
+                    checkpoint = {
+                        'model': raw_model.state_dict(),
+                        #'optimizer': optimizer.state_dict(),
+                        'model_args': model_args,
+                        'iter_num': iter_num,
+                        'best_val_loss': best_val_loss,
+                        'config': config,
+                    }
+                    torch.save(checkpoint, os.path.join(out_dir, ckpt_path+'_%s.pt'%iter_num))
+
     if iter_num == 0 and eval_only:
         break
 

@@ -40,13 +40,13 @@ global_seed = 0 # Used for reproducibilty of results
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 init_from = 'scratch' # 'scratch' or 'resume'
-ckpt_path = 'ckpt_softmax_rope_H12_HDim64_blkSize8K'
+ckpt_path = 'ckpt_softmaxRoPE_H36_HDim64'
 # wandb logging
 wandb_log = True # disabled by default
-wandb_project = 'pg19_rope'
-wandb_run_name = 'gpt2_softmax' # 'run' + str(time.time())
+wandb_project = 'opt_bumblebee'
+wandb_run_name = 'gpt2_softmax_H36_HDim64' # 'run' + str(time.time())
 # data
-dataset = 'pg19_sentPieceTokenizer_vocabSize10K'
+dataset = 'openwebtext'
 gradient_accumulation_steps = 8 # used to simulate larger batch sizes
 batch_size = 8 # if gradient_accumulation_steps > 1, this is the micro-batch size
 block_size = 8192
@@ -161,9 +161,9 @@ if init_from == 'scratch':
     gptconf = GPTConfig(**model_args)
     model = GPT(gptconf)
 elif init_from == 'resume':
-    print(f"Resuming training from {out_dir}")
     # resume training from a checkpoint.
     ckpt_p = os.path.join(out_dir, ckpt_path+'.pt')
+    print(f"Resuming training from checkpoint: {ckpt_p}")
     checkpoint = torch.load(ckpt_p, map_location=device)
     checkpoint_model_args = checkpoint['model_args']
     # force these config attributes to be equal otherwise we can't even resume training
@@ -250,9 +250,9 @@ def get_lr(it):
 if wandb_log and master_process:
     import wandb
     if init_from == 'resume':
-        wandb.init(project=wandb_project, name=wandb_run_name, config=config, resume="allow")
+        wandb.init(project=wandb_project, name=wandb_run_name, config=config, resume="allow", mode="offline")
     else:
-        wandb.init(project=wandb_project, name=wandb_run_name, config=config)
+        wandb.init(project=wandb_project, name=wandb_run_name, config=config, mode="offline")
 
 # training loop
 X, Y = get_batch('train') # fetch the very first batch
@@ -296,8 +296,19 @@ while True:
                 }
                 print(f"saving checkpoint to {out_dir}")
                 torch.save(checkpoint, os.path.join(out_dir, ckpt_path+'.pt'))
-                if iter_num % 2000 == 0:
+                if iter_num % 8000 == 0:
                     torch.save(checkpoint, os.path.join(out_dir, ckpt_path+'_%s.pt'%iter_num))
+                elif iter_num % 2000 == 0:
+                    checkpoint = {
+                        'model': raw_model.state_dict(),
+                        #'optimizer': optimizer.state_dict(),
+                        'model_args': model_args,
+                        'iter_num': iter_num,
+                        'best_val_loss': best_val_loss,
+                        'config': config,
+                    }
+                    torch.save(checkpoint, os.path.join(out_dir, ckpt_path+'_%s.pt'%iter_num))
+
     if iter_num == 0 and eval_only:
         break
 

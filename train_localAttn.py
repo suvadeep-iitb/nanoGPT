@@ -33,30 +33,31 @@ from model_localAttn import GPTConfig, GPT
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
 out_dir = 'out'
-eval_interval = 500
+eval_interval = 250
 log_interval = 1
-eval_iters = 500
+eval_iters = 50
 global_seed = 0 # Used for reproducibilty of results
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
 init_from = 'scratch' # 'scratch' or 'resume'
-ckpt_path = 'ckpt_softmaxLocalAttn'
+ckpt_path = 'ckpt_softmaxLocalAttn_H36_HDim64'
 # wandb logging
 wandb_log = True # disabled by default
-wandb_project = 'pg19_pytorch_attn'
+wandb_project = 'opt_bumblebee'
 wandb_run_name = 'gpt2_softmaxLocalAttn' # 'run' + str(time.time())
 # data
-dataset = 'pg19_sentPieceTokenizer_vocabSize10K'
-gradient_accumulation_steps = 2 # used to simulate larger batch sizes
-batch_size = 128 # if gradient_accumulation_steps > 1, this is the micro-batch size
-block_size = 2048
+dataset = 'openwebtext'
+gradient_accumulation_steps = 8 # used to simulate larger batch sizes
+batch_size = 8 # if gradient_accumulation_steps > 1, this is the micro-batch size
+block_size = 8192
 # model
-n_layer = 6
-n_head = 6
-head_dim = 32
-n_embd = 192
-n_local_head = n_head - 1
-local_attn_span = 50
+n_layer = 12
+n_head = 12
+head_dim = 64
+n_embd = 768
+n_global_head = 1
+n_local_head = n_head - n_global_head
+local_attn_span = 100
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer
@@ -76,7 +77,6 @@ backend = 'nccl' # 'nccl', 'gloo', etc.
 # system
 device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
-#dtype = 'float32'
 compile = True # use PyTorch 2.0 to compile the model to be faster
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
@@ -150,7 +150,7 @@ if os.path.exists(meta_path):
     print(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
 
 # model init
-model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, head_dim=head_dim,
+model_args = dict(n_layer=n_layer, n_embd=n_embd, n_head=n_head, head_dim=head_dim, 
                   n_local_head=n_local_head, local_attn_span=local_attn_span, 
                   block_size=block_size, bias=bias, vocab_size=None, dropout=dropout) # start with model_args from command line
 if init_from == 'scratch':
@@ -165,8 +165,8 @@ if init_from == 'scratch':
 elif init_from == 'resume':
     print(f"Resuming training from {out_dir}")
     # resume training from a checkpoint.
-    ckpt_path = os.path.join(out_dir, ckpt_path)
-    checkpoint = torch.load(ckpt_path, map_location=device)
+    ckpt_p = os.path.join(out_dir, ckpt_path)
+    checkpoint = torch.load(ckpt_p, map_location=device)
     checkpoint_model_args = checkpoint['model_args']
     # force these config attributes to be equal otherwise we can't even resume training
     # the rest of the attributes (e.g. dropout) can stay as desired from command line
@@ -216,8 +216,8 @@ def estimate_loss():
     out = {}
     model.eval()
     for split in ['train', 'val']:
-        losses = torch.zeros(eval_iters)
-        for k in range(eval_iters):
+        losses = torch.zeros(eval_iters*gradient_accumulation_steps)
+        for k in range(eval_iters*gradient_accumulation_steps):
             X, Y = get_batch(split)
             with ctx:
                 logits, loss = model(X, Y)
@@ -244,9 +244,9 @@ def get_lr(it):
 if wandb_log and master_process:
     import wandb
     if init_from == 'resume':
-        wandb.init(project=wandb_project, name=wandb_run_name, config=config, resume="allow")
+        wandb.init(project=wandb_project, name=wandb_run_name, config=config, resume="allow", mode="offline")
     else:
-        wandb.init(project=wandb_project, name=wandb_run_name, config=config)
+        wandb.init(project=wandb_project, name=wandb_run_name, config=config, mode="offline")
 
 # training loop
 X, Y = get_batch('train') # fetch the very first batch
@@ -278,7 +278,7 @@ while True:
         #if losses['val'] < best_val_loss or always_save_checkpoint:
         if losses['val'] < best_val_loss:
             best_val_loss = losses['val']
-        if iter_num % 2000 == 0:
+        if iter_num % 250 == 0:
             if iter_num > 0:
                 checkpoint = {
                     'model': raw_model.state_dict(),
@@ -289,7 +289,20 @@ while True:
                     'config': config,
                 }
                 print(f"saving checkpoint to {out_dir}")
-                torch.save(checkpoint, os.path.join(out_dir, ckpt_path+'_%s.pt'%iter_num))
+                torch.save(checkpoint, os.path.join(out_dir, ckpt_path+'.pt'))
+                if iter_num % 8000 == 0:
+                    torch.save(checkpoint, os.path.join(out_dir, ckpt_path+'_%s.pt'%iter_num))
+                elif iter_num % 2000 == 0:
+                    checkpoint = {
+                        'model': raw_model.state_dict(),
+                        #'optimizer': optimizer.state_dict(),
+                        'model_args': model_args,
+                        'iter_num': iter_num,
+                        'best_val_loss': best_val_loss,
+                        'config': config,
+                    }
+                    torch.save(checkpoint, os.path.join(out_dir, ckpt_path+'_%s.pt'%iter_num))
+
     if iter_num == 0 and eval_only:
         break
 
