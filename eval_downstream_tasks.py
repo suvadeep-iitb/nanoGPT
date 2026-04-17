@@ -90,7 +90,7 @@ elif model_type == 'softmaxLocalAttn_ape':
 elif model_type == 'softmaxLocalAttn_GH4_ape': 
     from model_localAttn import GPTConfig, GPT
 
-    ckpt_path = f'out/ckpt_softmaxLocalAttn_H36_HDim64_{ckpt_idx}.pt'
+    ckpt_path = f'out/models_softmaxLocalAttn_L36_H20_G4_HDim64/ckpt_softmaxLocalAttn_L36_G4_HDim64_{ckpt_idx}.pt'
 
     n_global_head = 4
     n_local_head = n_head - n_global_head
