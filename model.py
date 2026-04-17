@@ -54,7 +54,7 @@ class CausalSelfAttention(nn.Module):
 
         if attention_mask is not None:
             # (B, T) → (B, 1, 1, T)
-            attn_mask = (attention_mask == 0)[:, None, None, :]
+            attn_mask = (attention_mask == 1)[:, None, None, :]
         else:
             attn_mask = None
 
